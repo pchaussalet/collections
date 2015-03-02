@@ -45,6 +45,15 @@ function describeDict(Dict) {
         expect(dict.delete("__proto__")).toBe(false);
     });
 
+    it("should be able to contain $__proto__", function () {
+        var dict = Dict();
+        expect(dict.set("$__proto__", 10)).toBe(true);
+        expect(dict.get("$__proto__")).toBe(10);
+        expect(dict.delete("$__proto__")).toBe(true);
+        expect(dict.length).toBe(0);
+        expect(dict.delete("$__proto__")).toBe(false);
+    });
+
     it("should send a value for MapChange events", function () {
         var dict = Dict({a: 1});
 

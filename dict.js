@@ -5,7 +5,7 @@ var GenericCollection = require("./generic-collection");
 var GenericMap = require("./generic-map");
 var PropertyChanges = require("./listen/property-changes");
 
-// Burgled from https://github.com/domenic/dict
+var __PROTO__REGEXP = /__proto__$/;
 
 module.exports = Dict;
 function Dict(values, getDefault) {
@@ -14,27 +14,22 @@ function Dict(values, getDefault) {
     }
     getDefault = getDefault || Function.noop;
     this.getDefault = getDefault;
-    this.store = {};
-    this.length = 0;
+    this._keys = Object.create(null);
+    this._initializeStorage();
     this.addEach(values);
-}
-
-Dict.Dict = Dict; // hack so require("dict").Dict will work in MontageJS.
-
-function mangle(key) {
-    // Use "$" as the mangle prefix so dictionaries of valid identifiers can
-    // take advantage of optimizations for objects containing only valid
-    // identifiers. I have not verified that this makes a difference.
-    return "$" + key;
-}
-
-function unmangle(mangled) {
-    return mangled.slice(1);
 }
 
 Object.addEach(Dict.prototype, GenericCollection.prototype);
 Object.addEach(Dict.prototype, GenericMap.prototype);
 Object.addEach(Dict.prototype, PropertyChanges.prototype);
+
+Dict.Dict = Dict; // hack so require("dict").Dict will work in MontageJS.
+
+Dict.prototype._initializeStorage = function() {
+    this.store = [];
+    this.indexPool = [];
+    this.length = 0;
+};
 
 Dict.prototype.constructClone = function (values) {
     return new this.constructor(values, this.getDefault);
@@ -44,13 +39,14 @@ Dict.prototype.assertString = function (key) {
     if (typeof key !== "string") {
         throw new TypeError("key must be a string but Got " + key);
     }
-}
+};
 
 Dict.prototype.get = function (key, defaultValue) {
     this.assertString(key);
-    var mangled = mangle(key);
-    if (mangled in this.store) {
-        return this.store[mangled];
+    key = ensureUsableKey(key);
+    if (key in this._keys) {
+        var index = this._keys[key];
+        return this.store[index];
     } else if (arguments.length > 1) {
         return defaultValue;
     } else {
@@ -60,22 +56,29 @@ Dict.prototype.get = function (key, defaultValue) {
 
 Dict.prototype.set = function (key, value) {
     this.assertString(key);
-    var mangled = mangle(key);
-    if (mangled in this.store) { // update
+    key = ensureUsableKey(key);
+    if (key in this._keys) { // update
+        var index = this._keys[key];
         if (this.dispatchesMapChanges) {
-            this.dispatchBeforeMapChange(key, this.store[mangled]);
+            this.dispatchBeforeMapChange(key, this.store[index]);
         }
-        this.store[mangled] = value;
+        this.store[index] = value;
         if (this.dispatchesMapChanges) {
             this.dispatchMapChange(key, value);
         }
         return false;
     } else { // create
+        var index = this.indexPool.pop();
         if (this.dispatchesMapChanges) {
             this.dispatchBeforeMapChange(key, undefined);
         }
         this.length++;
-        this.store[mangled] = value;
+        if (index) {
+            this.store[index] = value;
+        } else {
+            index = this.store.push(value) - 1;
+        }
+        this._keys[key] = index;
         if (this.dispatchesMapChanges) {
             this.dispatchMapChange(key, value);
         }
@@ -85,18 +88,21 @@ Dict.prototype.set = function (key, value) {
 
 Dict.prototype.has = function (key) {
     this.assertString(key);
-    var mangled = mangle(key);
-    return mangled in this.store;
+    key = ensureUsableKey(key);
+    return key in this._keys && this._keys[key] != null;
 };
 
 Dict.prototype["delete"] = function (key) {
     this.assertString(key);
-    var mangled = mangle(key);
-    if (mangled in this.store) {
+    key = ensureUsableKey(key);
+    if (key in this._keys) {
+        var index = this._keys[key];
         if (this.dispatchesMapChanges) {
-            this.dispatchBeforeMapChange(key, this.store[mangled]);
+            this.dispatchBeforeMapChange(key, this.store[index]);
         }
-        delete this.store[mangle(key)];
+        delete this._keys[key];
+        this.store[index] = null;
+        this.indexPool.push(index);
         this.length--;
         if (this.dispatchesMapChanges) {
             this.dispatchMapChange(key, undefined);
@@ -107,23 +113,23 @@ Dict.prototype["delete"] = function (key) {
 };
 
 Dict.prototype.clear = function () {
-    var key, mangled;
-    for (mangled in this.store) {
-        key = unmangle(mangled);
+    for (var key in this._keys) {
+        var index = this._keys[key];
         if (this.dispatchesMapChanges) {
-            this.dispatchBeforeMapChange(key, this.store[mangled]);
+            this.dispatchBeforeMapChange(key, this.store[index]);
         }
-        delete this.store[mangled];
+        delete this._keys[key];
         if (this.dispatchesMapChanges) {
             this.dispatchMapChange(key, undefined);
         }
     }
-    this.length = 0;
+    this._initializeStorage();
 };
 
 Dict.prototype.reduce = function (callback, basis, thisp) {
-    for (var mangled in this.store) {
-        basis = callback.call(thisp, basis, this.store[mangled], unmangle(mangled), this);
+    for (var key in this._keys) {
+        var index = this._keys[key];
+        basis = callback.call(thisp, basis, this.store[index], key, this);
     }
     return basis;
 };
@@ -131,18 +137,26 @@ Dict.prototype.reduce = function (callback, basis, thisp) {
 Dict.prototype.reduceRight = function (callback, basis, thisp) {
     var self = this;
     var store = this.store;
-    return Object.keys(this.store).reduceRight(function (basis, mangled) {
-        return callback.call(thisp, basis, store[mangled], unmangle(mangled), self);
+    return Object.keys(this._keys).reduceRight(function (basis, key) {
+        return callback.call(thisp, basis, store[key], key, self);
     }, basis);
 };
 
 Dict.prototype.one = function () {
     var key;
-    for (key in this.store) {
-        return this.store[key];
+    for (key in this._keys) {
+        var index = this._keys[key];
+        return this.store[index];
     }
 };
 
 Dict.prototype.toJSON = function () {
     return this.toObject();
 };
+
+function ensureUsableKey(key) {
+    if (__PROTO__REGEXP.test(key)) {
+        key = '$'+key;
+    }
+    return key;
+}
